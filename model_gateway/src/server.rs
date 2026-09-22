@@ -1737,9 +1737,10 @@ mod tests {
 
     #[tokio::test]
     async fn configured_cors_allows_anthropic_headers() {
+        use axum::body::Body;
         use tower::ServiceExt;
 
-        let app = axum::Router::new()
+        let app = Router::new()
             .route(
                 "/v1/messages/count_tokens",
                 post(|| async { StatusCode::OK }),
