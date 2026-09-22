@@ -925,8 +925,12 @@ impl PDRouter {
             )]
             tokio::spawn(async move {
                 let prefill_drain_start = Instant::now();
-                if let Err(e) = prefill_response.bytes().await {
-                    warn!("Error consuming prefill response: {e}");
+                let mut chunks = prefill_response.bytes_stream();
+                while let Some(chunk) = chunks.next().await {
+                    if let Err(e) = chunk {
+                        warn!("Error consuming prefill response: {e}");
+                        break;
+                    }
                 }
                 Metrics::record_pd_prefill_duration(
                     metrics_labels::BACKEND_PD,
