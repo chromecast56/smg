@@ -1712,7 +1712,12 @@ fn create_cors_layer(allowed_origins: Vec<String>) -> tower_http::cors::CorsLaye
                 http::Method::DELETE,
                 http::Method::OPTIONS,
             ])
-            .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
+            .allow_headers([
+                http::header::CONTENT_TYPE,
+                http::header::AUTHORIZATION,
+                http::header::HeaderName::from_static("anthropic-version"),
+                http::header::HeaderName::from_static("anthropic-beta"),
+            ])
             .expose_headers([http::header::HeaderName::from_static("x-request-id")])
     };
 
@@ -1729,6 +1734,53 @@ mod tests {
 
     use super::*;
     use crate::config::TenantApiKeyEntry;
+
+    #[tokio::test]
+    async fn configured_cors_allows_anthropic_headers() {
+        use tower::ServiceExt;
+
+        let app = axum::Router::new()
+            .route(
+                "/v1/messages/count_tokens",
+                post(|| async { StatusCode::OK }),
+            )
+            .layer(create_cors_layer(vec!["https://client.example".into()]));
+        let response = app
+            .oneshot(
+                http::Request::builder()
+                    .method("OPTIONS")
+                    .uri("/v1/messages/count_tokens")
+                    .header("origin", "https://client.example")
+                    .header("access-control-request-method", "POST")
+                    .header(
+                        "access-control-request-headers",
+                        "content-type,authorization,anthropic-version,anthropic-beta",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        assert_eq!(
+            response.headers()["access-control-allow-origin"],
+            "https://client.example"
+        );
+        let allowed = response.headers()["access-control-allow-headers"]
+            .to_str()
+            .unwrap();
+        for header in [
+            "content-type",
+            "authorization",
+            "anthropic-version",
+            "anthropic-beta",
+        ] {
+            assert!(
+                allowed.split(',').any(|value| value.trim() == header),
+                "missing {header}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn plain_http_acceptor_enables_nodelay() {
