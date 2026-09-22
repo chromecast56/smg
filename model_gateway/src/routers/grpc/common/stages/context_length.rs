@@ -61,7 +61,9 @@ pub(crate) fn enforce_context_length(
 /// Only under the z.ai profile, whose vendor rejects such a request; every
 /// other profile keeps the engine's own policy (vLLM rejects at admission,
 /// SGLang clamps), as the input check above leaves `input + max_tokens`
-/// to the engine. As above, only a known window is enforced.
+/// to the engine. As above, only a known window is enforced, and like the
+/// input check this runs on the gRPC pipeline only: the HTTP router forwards
+/// the body and leaves the budget to the engine.
 pub(crate) fn enforce_output_budget(
     request_type: &RequestType,
     workers: &WorkerSelection,
@@ -93,7 +95,8 @@ pub(crate) fn enforce_output_budget(
     Err(error::bad_request(
         CONTEXT_LENGTH_EXCEEDED,
         format!(
-            "This model's maximum context length is {limit} tokens. However, you requested              {max_tokens} tokens for the completion. Please reduce max_tokens."
+            "This model's maximum context length is {limit} tokens. However, you requested \
+             {max_tokens} tokens for the completion. Please reduce max_tokens."
         ),
     ))
 }

@@ -65,8 +65,9 @@ pub(super) fn validate_chat(req: &ChatCompletionRequest) -> Result<(), validator
 }
 
 /// Thinking is always on: `disabled` (documented as unsupported) and
-/// `adaptive` (not a z.ai value) are rejected, and the effort, from either
-/// spelling, must be one the model takes.
+/// `adaptive` (not a z.ai value) are rejected, and the effort must be one
+/// the model takes, in each spelling the request carries: both are
+/// forwarded, so a bad value hidden behind the preferred one still counts.
 fn validate_thinking(req: &ChatCompletionRequest) -> Result<(), validator::ValidationError> {
     if let Some(thinking) = &req.thinking {
         match thinking.r#type {
@@ -86,15 +87,21 @@ fn validate_thinking(req: &ChatCompletionRequest) -> Result<(), validator::Valid
             Some(ThinkingType::Enabled) | None => {}
         }
     }
-    if req
-        .effective_reasoning_effort()
-        .is_some_and(|effort| !REASONING_EFFORTS.contains(&effort))
-    {
-        return Err(pinned(
-            "reasoning_effort_not_allowed",
-            "reasoning_effort",
-            "low, high or max",
-        ));
+    let efforts = [
+        (
+            "thinking.effort",
+            req.thinking.as_ref().and_then(|t| t.effort.as_deref()),
+        ),
+        ("reasoning_effort", req.reasoning_effort.as_deref()),
+    ];
+    for (field, effort) in efforts {
+        if effort.is_some_and(|effort| !REASONING_EFFORTS.contains(&effort)) {
+            return Err(pinned(
+                "reasoning_effort_not_allowed",
+                field,
+                "low, high or max",
+            ));
+        }
     }
     Ok(())
 }
@@ -239,6 +246,14 @@ mod tests {
             validate(&request(
                 json!({"thinking": {"type": "enabled", "effort": "medium"}})
             )),
+            Err("reasoning_effort_not_allowed".into())
+        );
+        // Both spellings are forwarded, so the shadowed one is checked too.
+        assert_eq!(
+            validate(&request(json!({
+                "thinking": {"type": "enabled", "effort": "low"},
+                "reasoning_effort": "medium"
+            }))),
             Err("reasoning_effort_not_allowed".into())
         );
     }

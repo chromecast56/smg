@@ -372,7 +372,7 @@ pub enum ThinkingType {
     Adaptive,
 }
 
-/// The `thinking` object shared by the Kimi and MiniMax chat APIs.
+/// The `thinking` object shared by the Kimi, MiniMax and z.ai chat APIs.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ThinkingParam {
