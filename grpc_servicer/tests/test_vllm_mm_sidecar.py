@@ -666,6 +666,12 @@ class TestServe:
         assert settings_lines and "s3cret" not in settings_lines[0]
         assert "redis_url=redis://***@cache:6379/0" in settings_lines[0]
         assert mm_sidecar.redacted_url("redis://cache:6379/0") == "redis://cache:6379/0"
+        # redis-py also reads credentials from the query string.
+        assert (
+            mm_sidecar.redacted_url("redis://cache:6379/0?password=s3cret&db=1")
+            == "redis://cache:6379/0"
+        )
+        assert mm_sidecar.redacted_url("rediss://u:p@cache:6380/2#x") == "rediss://***@cache:6380/2"
 
     def test_env_fills_in_for_absent_flags(self, monkeypatch):
         # An older namespace without the timeout flag, and no url/namespace given.

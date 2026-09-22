@@ -455,12 +455,12 @@ async def serve(args: argparse.Namespace) -> None:
 
 
 def redacted_url(url: str) -> str:
-    """The URL with any credentials replaced, for logs."""
+    """The URL's scheme, host and db for logs: userinfo is masked and the
+    query and fragment dropped, since redis-py also takes `?password=`."""
     parts = urlsplit(url)
-    if "@" not in parts.netloc:
-        return url
-    host = parts.netloc.rsplit("@", 1)[1]
-    return urlunsplit(parts._replace(netloc=f"***@{host}"))
+    host = parts.netloc.rsplit("@", 1)[-1]
+    userinfo = "***@" if "@" in parts.netloc else ""
+    return urlunsplit((parts.scheme, f"{userinfo}{host}", parts.path, "", ""))
 
 
 def build_parser(add_engine_args, parser_cls=argparse.ArgumentParser):

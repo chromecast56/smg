@@ -676,6 +676,8 @@ class MmSettings:
 
     @property
     def resolved(self) -> bool:
+        """Resolved at least once; `sources` names which settings, so a
+        subset-resolved object is not a full one (see `build_mm_processor`)."""
         return bool(self.sources)
 
     @property
@@ -701,6 +703,8 @@ class MmSettings:
         values: dict[str, Any] = {}
         sources: dict[str, str] = {}
         wanted = set(_MM_SETTING_SPECS if only is None else only)
+        if unknown := wanted - _MM_SETTING_SPECS.keys():
+            raise ValueError(f"unknown mm settings: {sorted(unknown)}")
         for name, (flag, env_name, default) in _MM_SETTING_SPECS.items():
             if name not in wanted:
                 continue
@@ -758,6 +762,8 @@ def build_mm_processor(
     everything comes from the env, as before.
     """
     resolved = (settings or MmSettings()).resolve(env)
+    if missing := _MM_SETTING_SPECS.keys() - resolved.sources.keys():
+        raise ValueError(f"mm settings resolved without {sorted(missing)}")
     mode = resolved.processor
     if mode == MODE_OFF:
         return None

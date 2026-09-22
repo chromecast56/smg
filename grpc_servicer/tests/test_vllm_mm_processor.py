@@ -321,6 +321,17 @@ class TestMmSettings:
             " in the next minor release"
         ]
 
+    def test_an_unknown_subset_name_fails_loudly(self):
+        with pytest.raises(ValueError, match="unknown mm settings: \\['redis-url'\\]"):
+            mm_processor.MmSettings().resolve(env={}, only=("redis-url",))
+
+    def test_a_subset_resolved_object_cannot_build_a_processor(self):
+        subset = mm_processor.MmSettings(processor="redis").resolve(env={}, only=("processor",))
+        with pytest.raises(ValueError, match="resolved without"):
+            mm_processor.build_mm_processor(
+                types.SimpleNamespace(model_config=None), env={}, settings=subset
+            )
+
     def test_resolving_twice_is_stable_and_quiet(self, caplog):
         env = {"SMG_VLLM_MM_PROCESSOR": "redis"}
         with caplog.at_level("WARNING", logger=self.LOGGER):
