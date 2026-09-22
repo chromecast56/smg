@@ -915,6 +915,8 @@ impl PDRouter {
         // so it stays a retryable status rather than an in-band stream error.
         if context.is_stream && !context.return_logprob && prefill_response.status().is_success() {
             let model_id = context.model_id.to_string();
+            let mut load_guards = load_guards;
+            let prefill_load_guard = load_guards.remove(0);
             // The body must still be read to the end: dropping a response with
             // an unread body closes the connection, which the prefill engine
             // treats as a client disconnect and aborts mid KV transfer,
@@ -924,11 +926,13 @@ impl PDRouter {
                 reason = "drains a prefill body the gateway has already committed past; shutdown need not wait for it"
             )]
             tokio::spawn(async move {
+                let _prefill_load_guard = prefill_load_guard;
                 let prefill_drain_start = Instant::now();
                 let mut chunks = prefill_response.bytes_stream();
                 while let Some(chunk) = chunks.next().await {
                     if let Err(e) = chunk {
                         warn!("Error consuming prefill response: {e}");
+                        prefill.record_outcome(StatusCode::BAD_GATEWAY.as_u16());
                         break;
                     }
                 }
@@ -2844,6 +2848,11 @@ mod tests {
 
     #[tokio::test]
     async fn stream_commits_on_decode_head_and_drains_prefill_body() {
+        check_prefill_drain(false).await;
+        check_prefill_drain(true).await;
+    }
+
+    async fn check_prefill_drain(fail_body: bool) {
         let release = Arc::new(tokio::sync::Notify::new());
         let (report_tx, report_rx) = oneshot::channel();
         let report_tx = Arc::new(std::sync::Mutex::new(Some(report_tx)));
@@ -2861,7 +2870,7 @@ mod tests {
                 async move {
                     let body = futures_util::stream::unfold(
                         (0u8, probe, release),
-                        |(step, mut probe, release)| async move {
+                        move |(step, mut probe, release)| async move {
                             match step {
                                 0 => Some((
                                     Ok::<_, std::io::Error>(Bytes::from_static(b": keepalive\n\n")),
@@ -2869,6 +2878,12 @@ mod tests {
                                 )),
                                 1 => {
                                     release.notified().await;
+                                    if fail_body {
+                                        return Some((
+                                            Err(std::io::Error::other("prefill body failed")),
+                                            (2, probe, release),
+                                        ));
+                                    }
                                     Some((
                                         Ok(Bytes::from_static(b"data: [DONE]\n\n")),
                                         (2, probe, release),
@@ -2893,7 +2908,23 @@ mod tests {
             axum::routing::post(|| async { ([(CONTENT_TYPE, "text/event-stream")], DECODE_SSE) }),
         );
         let router = create_test_pd_router();
-        register_pd_pair(&router, spawn_stub(prefill).await, spawn_stub(decode).await);
+        let prefill: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new(spawn_stub(prefill).await)
+                .worker_type(WorkerType::Prefill)
+                .circuit_breaker_config(crate::worker::CircuitBreakerConfig {
+                    failure_threshold: 1,
+                    ..Default::default()
+                })
+                .build(),
+        );
+        prefill.set_status(openai_protocol::worker::WorkerStatus::Ready);
+        let decode: Arc<dyn Worker> = Arc::from(create_test_worker(
+            spawn_stub(decode).await,
+            WorkerType::Decode,
+            true,
+        ));
+        router.worker_registry.register_or_replace(prefill.clone());
+        router.worker_registry.register_or_replace(decode.clone());
         let tenant = TenantRequestMeta::new(TenantKey::new("test-tenant"));
 
         let response = tokio::time::timeout(
@@ -2911,16 +2942,23 @@ mod tests {
         .expect("decode stream must complete while prefill is still open")
         .expect("response body");
         assert_eq!(&body[..], DECODE_SSE.as_bytes());
+        assert_eq!(prefill.load(), 1);
+        assert_eq!(decode.load(), 0);
 
         release.notify_one();
         let completed = tokio::time::timeout(std::time::Duration::from_secs(5), report_rx)
             .await
             .expect("prefill body must be released")
             .expect("probe report");
-        assert!(
-            completed,
-            "prefill body must be drained, not dropped with the connection"
-        );
+        assert_eq!(completed, !fail_body);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while prefill.load() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("prefill load must be released after draining");
+        assert_eq!(prefill.circuit_breaker_can_execute(), !fail_body);
     }
 
     #[tokio::test]
