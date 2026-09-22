@@ -21,7 +21,7 @@ use openai_protocol::{
     embedding::EmbeddingRequest,
     generate::GenerateRequest,
     interactions::InteractionsRequest,
-    messages::CreateMessageRequest,
+    messages::{CountMessageTokensRequest, CreateMessageRequest},
     multipart::AudioTranscriptionMultipart,
     parser::{ParseFunctionCallRequest, SeparateReasoningRequest},
     realtime_session::{
@@ -295,6 +295,23 @@ async fn v1_messages(
             state
                 .router
                 .route_messages(Some(&headers), &tenant_meta, body, &model),
+        )
+        .await
+}
+
+async fn v1_messages_count_tokens(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Extension(tenant_meta): Extension<middleware::TenantRequestMeta>,
+    cancel: middleware::scheduler::PreemptionGuard,
+    Json(body): Json<CountMessageTokensRequest>,
+) -> Response {
+    let model = body.model.clone();
+    cancel
+        .guard(
+            state
+                .router
+                .route_messages_count_tokens(Some(&headers), &tenant_meta, body, &model),
         )
         .await
 }
@@ -858,6 +875,7 @@ pub fn build_app(
             .route("/v1/rerank", post(v1_rerank))
             .route("/v1/embeddings", post(v1_embeddings))
             .route("/v1/messages", post(v1_messages))
+            .route("/v1/messages/count_tokens", post(v1_messages_count_tokens))
             .route("/v1/interactions", post(v1_interactions))
             .route("/v1/classify", post(v1_classify))
             // Per-request buffer-vs-stream decision for typed-JSON bodies;

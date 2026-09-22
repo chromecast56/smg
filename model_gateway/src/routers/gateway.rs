@@ -25,7 +25,7 @@ use openai_protocol::{
     embedding::EmbeddingRequest,
     generate::GenerateRequest,
     interactions::InteractionsRequest,
-    messages::CreateMessageRequest,
+    messages::{CountMessageTokensRequest, CreateMessageRequest},
     realtime_session::{
         RealtimeClientSecretCreateRequest, RealtimeSessionCreateRequest,
         RealtimeTranscriptionSessionCreateRequest,
@@ -480,6 +480,21 @@ impl RouterTrait for Gateway {
         self.dispatch(Some(model_id), NO_ROUTER, |router| async move {
             router
                 .route_messages(headers, tenant_meta, body, model_id)
+                .await
+        })
+        .await
+    }
+
+    async fn route_messages_count_tokens(
+        &self,
+        headers: Option<&HeaderMap>,
+        tenant_meta: &TenantRequestMeta,
+        body: CountMessageTokensRequest,
+        model_id: &str,
+    ) -> Response {
+        self.dispatch(Some(model_id), NO_ROUTER, |router| async move {
+            router
+                .route_messages_count_tokens(headers, tenant_meta, body, model_id)
                 .await
         })
         .await
