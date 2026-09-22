@@ -2037,12 +2037,23 @@ impl RouterTrait for PDRouter {
             Ok(bytes) => Bytes::from(bytes),
             Err(e) => return Self::handle_serialization_error(e),
         };
-        let request = self.build_post_with_headers(
-            worker.as_ref(),
-            "/v1/messages/count_tokens",
-            body,
+        if let Some(response) = overload::shed_if_worker_overloaded(worker.as_ref(), model_id) {
+            return response;
+        }
+        let _load_guard = WorkerLoadGuard::with_key(
+            worker.clone(),
+            self.policy_registry.sticky_header_key(headers),
+        );
+        let request = header_utils::apply_forwarded_request_headers(
+            attach_sized_body(
+                worker
+                    .http_client()
+                    .post(worker.endpoint_url("/v1/messages/count_tokens"))
+                    .header(CONTENT_TYPE, "application/json"),
+                body,
+            ),
             headers,
-            false,
+            worker.api_key(),
         );
         let res = match send_with_stale_conn_retry(request).await {
             Ok(res) => res,
@@ -2056,20 +2067,23 @@ impl RouterTrait for PDRouter {
         };
         let status = StatusCode::from_u16(res.status().as_u16())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        worker.record_outcome(status.as_u16());
         let mut response_headers = header_utils::preserve_response_headers(res.headers());
         header_utils::insert_routed_worker_id(&mut response_headers, worker.url());
         match res.bytes().await {
             Ok(bytes) => {
+                worker.record_outcome(status.as_u16());
                 let mut response = Response::new(Body::from(bytes));
                 *response.status_mut() = status;
                 *response.headers_mut() = response_headers;
                 response
             }
-            Err(e) => error::bad_gateway(
-                "prefill_count_tokens_failed",
-                format!("Failed to read prefill response: {e}"),
-            ),
+            Err(e) => {
+                worker.record_outcome(StatusCode::BAD_GATEWAY.as_u16());
+                error::bad_gateway(
+                    "prefill_count_tokens_failed",
+                    format!("Failed to read prefill response: {e}"),
+                )
+            }
         }
     }
 
@@ -2595,6 +2609,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn messages_count_tokens_tracks_load_auth_and_body_failure() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        for (client_auth, truncated) in [(None, false), (Some("Bearer client-key"), true)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let worker: Arc<dyn Worker> = Arc::new(
+                BasicWorkerBuilder::new(format!("http://{}", listener.local_addr().unwrap()))
+                    .worker_type(WorkerType::Prefill)
+                    .api_key("worker-key".to_string())
+                    .circuit_breaker_config(crate::worker::CircuitBreakerConfig {
+                        failure_threshold: 1,
+                        ..Default::default()
+                    })
+                    .build(),
+            );
+            worker.set_status(openai_protocol::worker::WorkerStatus::Ready);
+            let router = create_test_pd_router();
+            router.worker_registry.register_or_replace(worker.clone());
+            let tenant = TenantRequestMeta::new(TenantKey::new("test-tenant"));
+            let body = serde_json::from_value(json!({"model": "m", "messages": []})).unwrap();
+            let mut headers = HeaderMap::new();
+            if let Some(auth) = client_auth {
+                headers.insert("authorization", HeaderValue::from_static(auth));
+            }
+            let server = async {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                let mut request_headers = String::new();
+                loop {
+                    let mut line = String::new();
+                    socket.read_line(&mut line).await.unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    assert!(!line.is_empty());
+                    request_headers.push_str(&line);
+                }
+                let length: usize = request_headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                socket.read_exact(&mut vec![0; length]).await.unwrap();
+                assert_eq!(worker.load(), 1);
+                let auth = client_auth.unwrap_or("Bearer worker-key");
+                assert!(request_headers.contains(&format!("authorization: {auth}\r\n")));
+                let length = if truncated { 100 } else { 2 };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{{}}"
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.shutdown().await.unwrap();
+            };
+            let (response, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(
+                    router.route_messages_count_tokens(
+                        Some(&headers),
+                        &tenant,
+                        body,
+                        UNKNOWN_MODEL_ID
+                    ),
+                    server,
+                )
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                response.status(),
+                if truncated {
+                    StatusCode::BAD_GATEWAY
+                } else {
+                    StatusCode::OK
+                }
+            );
+            assert_eq!(worker.load(), 0);
+            assert_eq!(worker.circuit_breaker_can_execute(), !truncated);
+        }
+    }
+
+    #[tokio::test]
     async fn messages_count_tokens_uses_one_prefill_worker_and_no_bootstrap() {
         let (prefill_url, prefill_seen) = spawn_recording_stub(r#"{"input_tokens":42}"#).await;
         let (decode_url, decode_seen) = spawn_recording_stub("{}").await;
@@ -2605,6 +2700,8 @@ mod tests {
             serde_json::from_value(json!({
                 "model": "m",
                 "messages": [{"role": "user", "content": "hi"}],
+                "context_management": {"edits": []},
+                "mcp_servers": [{"type": "url", "name": "tools", "url": "https://example.com"}],
             }))
             .expect("valid count_tokens request")
         };
@@ -2638,6 +2735,11 @@ mod tests {
         assert_eq!(prefill_seen.len(), 1);
         let (path, forwarded) = &prefill_seen[0];
         assert_eq!(path, "/v1/messages/count_tokens");
+        let original = serde_json::to_value(body()).unwrap();
+        for field in ["context_management", "mcp_servers"] {
+            assert_eq!(forwarded[field], original[field]);
+            assert!(!forwarded[field].is_null());
+        }
         assert!(forwarded.get("bootstrap_room").is_none());
         assert!(decode_seen
             .lock()

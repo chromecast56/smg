@@ -3234,6 +3234,8 @@ mod tests {
             "model": "m",
             "system": "be brief",
             "messages": [{"role": "user", "content": "hello"}],
+            "context_management": {"edits": []},
+            "mcp_servers": [{"type": "url", "name": "tools", "url": "https://example.com"}],
         }))
         .unwrap();
         let mut headers = HeaderMap::new();
@@ -3260,6 +3262,13 @@ mod tests {
         assert_eq!(seen_headers["anthropic-version"], "2023-06-01");
         assert_eq!(seen_headers["anthropic-beta"], "token-counting-2024-11-01");
         assert_eq!(seen_body["system"], "be brief");
+        assert_eq!(seen_body["context_management"], json!({"edits": []}));
+        assert_eq!(
+            seen_body["mcp_servers"],
+            json!([
+                {"type": "url", "name": "tools", "url": "https://example.com"}
+            ])
+        );
         assert!(seen_body.get("max_tokens").is_none());
     }
 

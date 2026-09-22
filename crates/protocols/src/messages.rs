@@ -1145,6 +1145,10 @@ pub struct CountMessageTokensRequest {
 
     /// Tool definitions
     pub tools: Option<Vec<Tool>>,
+
+    /// Additional backend-specific token counting options.
+    #[serde(flatten)]
+    pub other: Map<String, Value>,
 }
 
 impl GenerationRequest for CountMessageTokensRequest {
